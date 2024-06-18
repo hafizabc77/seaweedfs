@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seaweedfs/seaweedfs/weed/stats"
@@ -72,10 +73,18 @@ type FilerOption struct {
 	DownloadMaxBytesPs    int64
 	DiskType              string
 	AllowedOrigins        []string
+	ExposeDirectoryData   bool
+	JoinExistingFiler     bool
 }
 
 type FilerServer struct {
-	inFlightDataSize      int64
+	inFlightDataSize int64
+	listenersWaits   int64
+
+	// notifying clients
+	listenersLock sync.Mutex
+	listenersCond *sync.Cond
+
 	inFlightDataLimitCond *sync.Cond
 
 	filer_pb.UnimplementedSeaweedFilerServer
@@ -83,15 +92,12 @@ type FilerServer struct {
 	secret         security.SigningKey
 	filer          *filer.Filer
 	filerGuard     *security.Guard
+	volumeGuard    *security.Guard
 	grpcDialOption grpc.DialOption
 
 	// metrics read from the master
 	metricsAddress     string
 	metricsIntervalSec int
-
-	// notifying clients
-	listenersLock sync.Mutex
-	listenersCond *sync.Cond
 
 	// track known metadata listeners
 	knownListenersLock sync.Mutex
@@ -109,11 +115,23 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	v.SetDefault("jwt.filer_signing.read.expires_after_seconds", 60)
 	readExpiresAfterSec := v.GetInt("jwt.filer_signing.read.expires_after_seconds")
 
+	volumeSigningKey := v.GetString("jwt.signing.key")
+	v.SetDefault("jwt.signing.expires_after_seconds", 10)
+	volumeExpiresAfterSec := v.GetInt("jwt.signing.expires_after_seconds")
+
+	volumeReadSigningKey := v.GetString("jwt.signing.read.key")
+	v.SetDefault("jwt.signing.read.expires_after_seconds", 60)
+	volumeReadExpiresAfterSec := v.GetInt("jwt.signing.read.expires_after_seconds")
+
 	v.SetDefault("cors.allowed_origins.values", "*")
 
 	allowedOrigins := v.GetString("cors.allowed_origins.values")
 	domains := strings.Split(allowedOrigins, ",")
 	option.AllowedOrigins = domains
+
+	v.SetDefault("filer.expose_directory_metadata.enabled", true)
+	returnDirMetadata := v.GetBool("filer.expose_directory_metadata.enabled")
+	option.ExposeDirectoryData = returnDirMetadata
 
 	fs = &FilerServer{
 		option:                option,
@@ -130,16 +148,19 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	v.SetDefault("filer.options.max_file_name_length", 255)
 	maxFilenameLength := v.GetUint32("filer.options.max_file_name_length")
 	fs.filer = filer.NewFiler(*option.Masters, fs.grpcDialOption, option.Host, option.FilerGroup, option.Collection, option.DefaultReplication, option.DataCenter, maxFilenameLength, func() {
-		fs.listenersCond.Broadcast()
+		if atomic.LoadInt64(&fs.listenersWaits) > 0 {
+			fs.listenersCond.Broadcast()
+		}
 	})
 	fs.filer.Cipher = option.Cipher
 	// we do not support IP whitelist right now
 	fs.filerGuard = security.NewGuard([]string{}, signingKey, expiresAfterSec, readSigningKey, readExpiresAfterSec)
+	fs.volumeGuard = security.NewGuard([]string{}, volumeSigningKey, volumeExpiresAfterSec, volumeReadSigningKey, volumeReadExpiresAfterSec)
 
 	fs.checkWithMaster()
 
 	go stats.LoopPushingMetric("filer", string(fs.option.Host), fs.metricsAddress, fs.metricsIntervalSec)
-	go fs.filer.KeepMasterClientConnected()
+	go fs.filer.KeepMasterClientConnected(context.Background())
 
 	if !util.LoadConfiguration("filer", false) {
 		v.SetDefault("leveldb2.enabled", true)
@@ -157,7 +178,7 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 	fs.option.recursiveDelete = v.GetBool("filer.options.recursive_delete")
 	v.SetDefault("filer.options.buckets_folder", "/buckets")
 	fs.filer.DirBucketsPath = v.GetString("filer.options.buckets_folder")
-	// TODO deprecated, will be be removed after 2020-12-31
+	// TODO deprecated, will be removed after 2020-12-31
 	// replaced by https://github.com/seaweedfs/seaweedfs/wiki/Path-Specific-Configuration
 	// fs.filer.FsyncBuckets = v.GetStringSlice("filer.options.buckets_fsync")
 	isFresh := fs.filer.LoadConfiguration(v)
@@ -175,8 +196,11 @@ func NewFilerServer(defaultMux, readonlyMux *http.ServeMux, option *FilerOption)
 		readonlyMux.HandleFunc("/", fs.readonlyFilerHandler)
 	}
 
-	existingNodes := fs.filer.ListExistingPeerUpdates()
+	existingNodes := fs.filer.ListExistingPeerUpdates(context.Background())
 	startFromTime := time.Now().Add(-filer.LogFlushInterval)
+	if option.JoinExistingFiler {
+		startFromTime = time.Time{}
+	}
 	if isFresh {
 		glog.V(0).Infof("%s bootstrap from peers %+v", option.Host, existingNodes)
 		if err := fs.filer.MaybeBootstrapFromPeers(option.Host, existingNodes, startFromTime); err != nil {

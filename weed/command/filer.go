@@ -62,6 +62,8 @@ type FilerOptions struct {
 	downloadMaxMBps         *int
 	diskType                *string
 	allowedOrigins          *string
+	exposeDirectoryData     *bool
+	joinExistingFiler       *bool
 }
 
 func init() {
@@ -93,6 +95,8 @@ func init() {
 	f.downloadMaxMBps = cmdFiler.Flag.Int("downloadMaxMBps", 0, "download max speed for each download request, in MB per second")
 	f.diskType = cmdFiler.Flag.String("disk", "", "[hdd|ssd|<tag>] hard drive or solid state drive or any tag")
 	f.allowedOrigins = cmdFiler.Flag.String("allowedOrigins", "*", "comma separated list of allowed origins")
+	f.exposeDirectoryData = cmdFiler.Flag.Bool("exposeDirectoryData", true, "whether to return directory metadata and content in Filer UI")
+	f.joinExistingFiler = cmdFiler.Flag.Bool("joinExistingFiler", false, "enable if new filer wants to join existing cluster")
 
 	// start s3 on filer
 	filerStartS3 = cmdFiler.Flag.Bool("s3", false, "whether to start S3 gateway")
@@ -260,6 +264,7 @@ func (fo *FilerOptions) startFiler() {
 		DownloadMaxBytesPs:    int64(*fo.downloadMaxMBps) * 1024 * 1024,
 		DiskType:              *fo.diskType,
 		AllowedOrigins:        strings.Split(*fo.allowedOrigins, ","),
+		JoinExistingFiler:     *fo.joinExistingFiler,
 	})
 	if nfs_err != nil {
 		glog.Fatalf("Filer startup error: %v", nfs_err)

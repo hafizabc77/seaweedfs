@@ -69,7 +69,7 @@ func NewFiler(masters pb.ServerDiscovery, grpcDialOption grpc.DialOption, filerH
 		f.UniqueFilerId = -f.UniqueFilerId
 	}
 
-	f.LocalMetaLogBuffer = log_buffer.NewLogBuffer("local", LogFlushInterval, f.logFlushFunc, notifyFn)
+	f.LocalMetaLogBuffer = log_buffer.NewLogBuffer("local", LogFlushInterval, f.logFlushFunc, nil, notifyFn)
 	f.metaLogCollection = collection
 	f.metaLogReplication = replication
 
@@ -143,8 +143,8 @@ func (f *Filer) AggregateFromPeers(self pb.ServerAddress, existingNodes []*maste
 
 }
 
-func (f *Filer) ListExistingPeerUpdates() (existingNodes []*master_pb.ClusterNodeUpdate) {
-	return cluster.ListExistingPeerUpdates(f.GetMaster(), f.GrpcDialOption, f.MasterClient.FilerGroup, cluster.FilerType)
+func (f *Filer) ListExistingPeerUpdates(ctx context.Context) (existingNodes []*master_pb.ClusterNodeUpdate) {
+	return cluster.ListExistingPeerUpdates(f.GetMaster(ctx), f.GrpcDialOption, f.MasterClient.FilerGroup, cluster.FilerType)
 }
 
 func (f *Filer) SetStore(store FilerStore) (isFresh bool) {
@@ -177,12 +177,12 @@ func (f *Filer) GetStore() (store FilerStore) {
 	return f.Store
 }
 
-func (fs *Filer) GetMaster() pb.ServerAddress {
-	return fs.MasterClient.GetMaster()
+func (fs *Filer) GetMaster(ctx context.Context) pb.ServerAddress {
+	return fs.MasterClient.GetMaster(ctx)
 }
 
-func (fs *Filer) KeepMasterClientConnected() {
-	fs.MasterClient.KeepConnectedToMaster()
+func (fs *Filer) KeepMasterClientConnected(ctx context.Context) {
+	fs.MasterClient.KeepConnectedToMaster(ctx)
 }
 
 func (f *Filer) BeginTransaction(ctx context.Context) (context.Context, error) {
@@ -377,6 +377,6 @@ func (f *Filer) doListDirectoryEntries(ctx context.Context, p util.FullPath, sta
 }
 
 func (f *Filer) Shutdown() {
-	f.LocalMetaLogBuffer.Shutdown()
+	f.LocalMetaLogBuffer.ShutdownLogBuffer()
 	f.Store.Shutdown()
 }
